@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import sys
 import time
 import subprocess
 import requests
@@ -321,12 +322,12 @@ def login(sb) -> bool:
         time.sleep(1)
         cur_url = sb.get_current_url().split('?')[0].lower()
         page_title = sb.get_title() or ""
-        if cur_url.startswith(f"{BASE_URL}/dashboard") or "Dashboard | KataBump" in page_title.lower():
+        if cur_url.startswith(f"{BASE_URL}/dashboard") or "dashboard | katabump" in page_title.lower():
             break
 
     cur_url = sb.get_current_url().split('?')[0].lower()
     page_title = sb.get_title() or ""
-    if cur_url.startswith(f"{BASE_URL}/dashboard") or "Dashboard | KataBump" in page_title.lower():
+    if cur_url.startswith(f"{BASE_URL}/dashboard") or "dashboard | katabump" in page_title.lower():
         print(f"✅ 登录成功！(URL: {sb.get_current_url()}, Title: {page_title})")
         return True
         
@@ -345,7 +346,7 @@ def _read_alert(sb):
         return ""
 
 
-def _goto_server_detail(sb) -> bool:
+def _goto_server_detail(sb) -> str:
     """在 Dashboard 首页查找并点击 See 进入服务器详情页"""
     print("\n🖥️  正在进入服务器续期页...")
     time.sleep(5)
@@ -355,7 +356,7 @@ def _goto_server_detail(sb) -> bool:
     if alert_text and "can't renew" in alert_text.lower():
         print(f"ℹ️  页面顶部提示: {alert_text}")
         send_tg_message("ℹ️", "⚠️ 未到续期时间", alert_text)
-        return False
+        return "not_due"
 
     # 多种选择器尝试查找 See 链接
     selectors = [
@@ -404,13 +405,13 @@ def _goto_server_detail(sb) -> bool:
         except Exception:
             pass
         sb.save_screenshot("servers_page_fail.png")
-        return False
+        return "error"
 
     print("🖱️  点击 'See' 进入服务器详情页...")
     see_link.click()
     time.sleep(5)
     print(f"📄 当前页面: {sb.get_current_url()}")
-    return True
+    return "ok"
 
 
 def _open_renew_modal(sb) -> bool:
@@ -423,6 +424,7 @@ def _open_renew_modal(sb) -> bool:
             renew_btn = sb.find_element('button.btn.btn-outline-primary', timeout=5)
         except Exception:
             print("  ❌ 未找到 Renew 按钮")
+            sb.save_screenshot("renew_btn_fail.png")
             return False
 
     sb.execute_script("""
@@ -442,7 +444,8 @@ def _open_renew_modal(sb) -> bool:
         print("✅ Renew 模态框已弹出")
         return True
     except Exception:
-        print("⚠️ 模态框未弹出")
+        print("❌ 模态框未弹出")
+        sb.save_screenshot("renew_modal_fail.png")
         return False
 
 
@@ -545,26 +548,36 @@ def _open_renew_modal(sb) -> bool:
 #     return False
 
 
-def _submit_renew(sb):
+def _submit_renew(sb) -> bool:
     """点击模态框内的 Renew 提交按钮"""
     print("🖱️  点击模态框中的 Renew 按钮...")
     try:
-        submit = sb.find_element('div.modal-footer button.btn.btn-primary', timeout=10)
+        submit = sb.find_element('div.modal.show div.modal-footer button.btn.btn-primary', timeout=10)
         submit.click()
     except Exception:
-        sb.execute_script("""
+        clicked = sb.execute_script("""
             (function(){
-                var m = document.querySelector('button.btn.btn-primary');
-                if (!m) return;
+                var m = document.querySelector('div.modal.show');
+                if (!m) return false;
                 var bs = m.querySelectorAll('button');
-                for (var i = 0; i < bs.length; i++)
-                    if (/renew/i.test(bs[i].textContent)) bs[i].click();
+                for (var i = 0; i < bs.length; i++) {
+                    if (/renew/i.test(bs[i].textContent || '')) {
+                        bs[i].click();
+                        return true;
+                    }
+                }
+                return false;
             })()
         """)
+        if not clicked:
+            print("❌ 未能在模态框中找到 Renew 提交按钮")
+            sb.save_screenshot("renew_submit_fail.png")
+            return False
     time.sleep(8)
+    return True
 
 
-def _check_renew_result(sb):
+def _check_renew_result(sb) -> bool:
     """读取页面 alert 提示，判断续期结果并推送 TG 通知"""
     print("\n📋 检查续期结果...")
     alert_text = _read_alert(sb)
@@ -575,42 +588,58 @@ def _check_renew_result(sb):
     if alert_text:
         print(f"📩 页面提示: {alert_text}")
         low = alert_text.lower()
-        if "can't renew" in low or "unable" in low:
+        if "can't renew" in low or "you will be able to" in low or ("unable" in low and "yet" in low):
             send_tg_message("⏳", "未到续期时间", alert_text)
-        elif any(kw in low for kw in ( "renewed", "success", "extended")):
+            return True
+        elif any(kw in low for kw in ("renewed", "success", "extended")):
             send_tg_message("✅", "续期成功", alert_text)
+            return True
         else:
-            send_tg_message("ℹ️", "续期操作已执行", alert_text)
+            print(f"❌ 续期返回异常或未知提示: {alert_text}")
+            sb.save_screenshot("renew_unknown_alert.png")
+            send_tg_message("❌", "续期返回异常提示", alert_text)
+            return False
     else:
-        print("ℹ️ 未检测到明确的提示框，可能续期操作未生效")
-        send_tg_message("ℹ️", "续期操作已执行", "未检测到明确提示")
+        print("❌ 未检测到明确的提示框，续期操作可能未生效")
+        sb.save_screenshot("renew_no_alert.png")
+        send_tg_message("❌", "续期失败", "未检测到明确提示")
+        return False
 
 
-def renew_server(sb):
+def renew_server(sb) -> bool:
     """登录成功后调用：自动进入详情页 -> Renew -> ALTCHA -> 提交"""
     print("\n" + "#" * 25)
     print("  开始自动续期流程")
     print("#" * 25)
 
-    if not _goto_server_detail(sb):
-        return
+    detail_status = _goto_server_detail(sb)
+    if detail_status == "not_due":
+        return True
+    if detail_status != "ok":
+        return False
 
     if not _open_renew_modal(sb):
-        return
+        return False
 
     # altcha_ok = _solve_altcha(sb)
     # if not altcha_ok:
     #     print("⚠️ ALTCHA 验证未通过，仍尝试提交 Renew...")
 
-    _submit_renew(sb)
-    _check_renew_result(sb)
+    if not _submit_renew(sb):
+        return False
+    return _check_renew_result(sb)
 
 
 #  脚本执行入口 (可选代理)
-def main():
+def main() -> int:
     print("#" * 25)
     print("   katabump 自动登录续期")
     print("#" * 25)
+
+    if not EMAIL or not PASSWORD:
+        print("❌ 缺少 KATABUMP_EMAIL 或 KATABUMP_PASSWORD 环境变量。")
+        send_tg_message("❌", "配置缺失", "缺少账号或密码环境变量")
+        return 1
 
     IS_PROXY = os.environ.get("IS_PROXY", "false").lower() == "true"
     proxy_str = os.environ.get("PROXY_SERVER", "").strip() or "http://127.0.0.1:1081"
@@ -623,19 +652,25 @@ def main():
         print("🌐 未使用代理，直连访问")
     
     print("🚀 启动浏览器...")
-    with SB(**sb_kwargs) as sb:
-        # print("✅ 浏览器已启动")
-        try:
-            sb.open("https://api.ip.sb/ip")
-            print(f"📍  当前出口IP: {sb.get_text('body')}")
-        except Exception:
-            pass
+    try:
+        with SB(**sb_kwargs) as sb:
+            # print("✅ 浏览器已启动")
+            try:
+                sb.open("https://api.ip.sb/ip")
+                print(f"📍  当前出口IP: {sb.get_text('body')}")
+            except Exception:
+                pass
 
-        if login(sb):
-            renew_server(sb)   # 登录成功后自动续期
-        else:
-            print("\n❌ 登录失败，终止后续续期操作。")
-            send_tg_message("❌", "登录失败", "未知")
+            if login(sb):
+                return 0 if renew_server(sb) else 1   # 登录成功后自动续期
+            else:
+                print("\n❌ 登录失败，终止后续续期操作。")
+                send_tg_message("❌", "登录失败", "未知")
+                return 1
+    except Exception as e:
+        print(f"\n❌ 脚本执行异常: {e}")
+        send_tg_message("❌", "脚本执行异常", str(e))
+        return 1
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

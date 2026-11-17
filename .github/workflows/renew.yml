@@ -2,8 +2,12 @@ name: Katabump Auto Renew
 
 on:
   schedule:
-  - cron: '30 22 */3 * *'  # 每天 UTC 22:30 (北京时间 6:30点) 运行,根据服务到期时间自行修改
+  - cron: '17 1,13 * * *'  # 每天两次避峰运行 (UTC 01:17 / 13:17, 即北京时间 09:17 / 21:17), 防止漏单或偶发失败导致断续
   workflow_dispatch: # 允许手动触发
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
   Renew-Katabump:
@@ -43,11 +47,22 @@ jobs:
         xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
           python3 app.py
 
-    # 更新时间到time.txt,避免90天未更新导致工作流暂停
+    - name: 📸 上传失败截图
+      if: failure()
+      uses: actions/upload-artifact@v7
+      with:
+        name: failure-screenshots
+        path: '*.png'
+        if-no-files-found: ignore
+        retention-days: 7
+
+    # 更新时间到time.txt,避免60天未更新导致工作流暂停
     - name: 🕒 更新运行时间
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
+        git fetch --depth=1 origin main
+        git checkout -B main origin/main
         echo "$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')" > time.txt
         git add time.txt
         if git diff --cached --quiet; then
@@ -66,7 +81,7 @@ jobs:
         count=0
         for run_id in $runs; do
           count=$((count + 1))
-          if [ $count -gt 1 ]; then
+          if [ $count -gt 10 ]; then
             echo "删除运行记录: $run_id"
             gh run delete $run_id || true
           fi
